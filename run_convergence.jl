@@ -129,8 +129,8 @@ function solve_tube(h_val::Float64, out_name::String)
 end
 
 function run_convergence()
-    h_vals = [0.4, 0.3, 0.22, 0.15]
-    h_ref = 0.1
+    h_vals = [0.4, 0.2, 0.1, 0.05]
+    h_ref = 0.03
 
     println("Generating Reference Mesh (h_ref = $h_ref)")
     u_ref, p_ref, c_ref = solve_tube(h_ref, "tube_ref")
