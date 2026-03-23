@@ -1,6 +1,8 @@
 using Gridap
 using LinearAlgebra
 
+include("custom_solvers.jl")
+
 function run_stationary_boussinesq()
     println("Setting up the stationary Boussinesq model...")
 
@@ -149,7 +151,8 @@ function run_stationary_boussinesq()
         )dΩ
         
         op_NS = AffineFEOperator(a_NS, l_NS, X_NS, Y_NS)
-        uh_new, ph_new = solve(op_NS)
+        solver_NS = CustomIterativeSolver(:gmres; precond=:jacobi, reltol=1e-5)
+        uh_new, ph_new = Gridap.solve(solver_NS, op_NS)
         
         # ----------------------------------------------------------------------
         # Step B: Solute transport solve (Advection-Diffusion driven by new U)
@@ -166,7 +169,8 @@ function run_stationary_boussinesq()
         l_AD(w) = ∫( 0.0 * w )dΩ
         
         op_AD = AffineFEOperator(a_AD, l_AD, Uc, Vc)
-        ch_new = solve(op_AD)
+        solver_AD = CustomIterativeSolver(:gmres; precond=:ilu, tau=0.01, reltol=1e-5)
+        ch_new = Gridap.solve(solver_AD, op_AD)
         
         # ----------------------------------------------------------------------
         # Step C: Convergence Verification

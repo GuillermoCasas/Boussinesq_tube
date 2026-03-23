@@ -3,7 +3,9 @@ using GridapGmsh
 using LinearAlgebra
 using JSON
 
-function solve_tube(h_val::Float64, out_name::String)
+include("custom_solvers.jl")
+
+function solve_tube(h_val::Float64, out_name::String, config::Dict)
     println("\n===========================================")
     println("Solving for mesh size h = $h_val")
     println("===========================================")
@@ -12,8 +14,8 @@ function solve_tube(h_val::Float64, out_name::String)
     GridapGmsh.gmsh.option.setNumber("General.Terminal", 0)
     GridapGmsh.gmsh.model.add("tube")
 
-    L = 5.0
-    R = 0.5
+    L = config["geometry"]["L"]
+    R = config["geometry"]["R"]
 
     GridapGmsh.gmsh.model.geo.addPoint(0, 0, 0, h_val, 1)
     GridapGmsh.gmsh.model.geo.addPoint(0, 0, R, h_val, 2)
@@ -51,16 +53,24 @@ function solve_tube(h_val::Float64, out_name::String)
     GridapGmsh.gmsh.model.setPhysicalName(3, 4, "fluid")
 
     GridapGmsh.gmsh.model.mesh.generate(3)
-    msh_file = "data/$out_name.msh"
+    msh_file = "meshes/$out_name.msh"
     GridapGmsh.gmsh.write(msh_file)
     GridapGmsh.gmsh.finalize()
 
-    rho0 = 1.0; mu = 0.05; D = 0.01; g_mag = 9.81; beta_c = 0.1; c_ref = 0.0
+    rho0 = config["physics"]["rho0"]
+    mu = config["physics"]["mu"]
+    D = config["physics"]["D"]
+    g_mag = config["physics"]["g_mag"]
+    beta_c = config["physics"]["beta_c"]
+    c_ref = config["physics"]["c_ref"]
     e_g = VectorValue(0.0, 0.0, -1.0) 
 
-    U_max = 1.0
-    c_top = 1.0; c_mid = 2.0; c_bot = 3.0
-    tol = 1e-4; max_iters = 30
+    U_max = config["boundary_conditions"]["U_max"]
+    c_top = config["boundary_conditions"]["c_top"]
+    c_mid = config["boundary_conditions"]["c_mid"]
+    c_bot = config["boundary_conditions"]["c_bot"]
+    tol = config["numerical"]["tol"]
+    max_iters = config["numerical"]["max_iters"]
 
     model = DiscreteModelFromFile(msh_file)
     Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 2), conformity=:H1, dirichlet_tags=["inlet", "walls"])
@@ -104,14 +114,18 @@ function solve_tube(h_val::Float64, out_name::String)
         l_NS(Y) = ∫( body_force ⋅ Y[1] + τ_m_field * (rho0 * (uh_prev ⋅ ∇(Y[1]))) ⋅ body_force )dΩ
         
         op_NS = AffineFEOperator(a_NS, l_NS, X_NS, Y_NS)
-        uh_new, ph_new = solve(op_NS)
+        ns_cfg = config["numerical"]["solver_NS"]
+        solver_NS = CustomIterativeSolver(Symbol(ns_cfg["type"]); precond=Symbol(ns_cfg["precond"]), reltol=ns_cfg["reltol"])
+        uh_new, ph_new = Gridap.solve(solver_NS, op_NS)
         
         τ_c_field = τ_c ∘ uh_new
         a_AD(c, w) = ∫( (uh_new ⋅ ∇(c)) * w + D * (∇(c) ⋅ ∇(w)) + τ_c_field * (uh_new ⋅ ∇(w)) * (uh_new ⋅ ∇(c)) )dΩ
         l_AD(w) = ∫( 0.0 * w )dΩ
         
         op_AD = AffineFEOperator(a_AD, l_AD, Uc, Vc)
-        ch_new = solve(op_AD)
+        ad_cfg = config["numerical"]["solver_AD"]
+        solver_AD = CustomIterativeSolver(Symbol(ad_cfg["type"]); precond=Symbol(ad_cfg["precond"]), tau=ad_cfg["tau"], reltol=ad_cfg["reltol"])
+        ch_new = Gridap.solve(solver_AD, op_AD)
         
         u_err = norm(get_free_dof_values(uh_new) .- get_free_dof_values(uh_prev)) / (norm(get_free_dof_values(uh_new)) + 1e-10)
         c_err = norm(get_free_dof_values(ch_new) .- get_free_dof_values(ch_prev)) / (norm(get_free_dof_values(ch_new)) + 1e-10)
@@ -129,11 +143,13 @@ function solve_tube(h_val::Float64, out_name::String)
 end
 
 function run_convergence()
-    h_vals = [0.4, 0.2, 0.1, 0.05]
-    h_ref = 0.03
+    h_vals = [0.3, 0.2]
+    h_ref = 0.15
+
+    config = JSON.parsefile("data/case_options.json")
 
     println("Generating Reference Mesh (h_ref = $h_ref)")
-    u_ref, p_ref, c_ref = solve_tube(h_ref, "tube_ref")
+    u_ref, p_ref, c_ref = solve_tube(h_ref, "tube_ref", config)
 
     # Fixed core points to avoid boundary evaluation issues
     pts = Point{3,Float64}[]
@@ -167,7 +183,7 @@ function run_convergence()
     errors_u = Float64[]; errors_p = Float64[]; errors_c = Float64[]
 
     for h in h_vals
-        uh, ph, ch = solve_tube(h, "tube_$h")
+        uh, ph, ch = solve_tube(h, "tube_$h", config)
         
         e_u_sum = 0.0; e_p_sum = 0.0; e_c_sum = 0.0
         v_count = 0

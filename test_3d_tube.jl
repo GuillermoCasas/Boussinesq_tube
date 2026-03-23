@@ -1,16 +1,19 @@
 using Gridap
 using GridapGmsh
 using LinearAlgebra
+using JSON
 
-function generate_tube_mesh()
+include("custom_solvers.jl")
+
+function generate_tube_mesh(config::Dict)
     println("Generating 3D Gmsh mesh using GEO...")
     GridapGmsh.gmsh.initialize()
     GridapGmsh.gmsh.option.setNumber("General.Terminal", 0)
     GridapGmsh.gmsh.model.add("tube")
 
-    L = 5.0
-    R = 0.5
-    mesh_size = 0.4 # Coarse to keep the test quick
+    L = config["geometry"]["L"]
+    R = config["geometry"]["R"]
+    mesh_size = config["geometry"]["mesh_size"]
 
     # Define bottom surface
     GridapGmsh.gmsh.model.geo.addPoint(0, 0, 0, mesh_size, 1)
@@ -55,36 +58,36 @@ function generate_tube_mesh()
 
     GridapGmsh.gmsh.model.mesh.generate(3)
 
-    GridapGmsh.gmsh.write("data/tube.msh")
+    GridapGmsh.gmsh.write("meshes/tube.msh")
     GridapGmsh.gmsh.finalize()
-    println("Mesh saved to data/tube.msh")
+    println("Mesh saved to meshes/tube.msh")
 end
 
-function run_stationary_boussinesq_3d()
+function run_stationary_boussinesq_3d(config::Dict)
     println("\nLoading the stationary Boussinesq model in 3D...")
 
-    L = 5.0
-    R = 0.5
+    L = config["geometry"]["L"]
+    R = config["geometry"]["R"]
 
-    rho0 = 1.0
-    mu = 0.05       # Larger mu for stability on coarse grid
-    D = 0.01        
-    g_mag = 9.81
-    beta_c = 0.1
-    c_ref = 0.0
+    rho0 = config["physics"]["rho0"]
+    mu = config["physics"]["mu"]       
+    D = config["physics"]["D"]        
+    g_mag = config["physics"]["g_mag"]
+    beta_c = config["physics"]["beta_c"]
+    c_ref = config["physics"]["c_ref"]
     e_g = VectorValue(0.0, 0.0, -1.0) # Gravity in -z
 
-    U_max = 1.0
+    U_max = config["boundary_conditions"]["U_max"]
 
-    c_top = 1.0
-    c_mid = 2.0
-    c_bot = 3.0
+    c_top = config["boundary_conditions"]["c_top"]
+    c_mid = config["boundary_conditions"]["c_mid"]
+    c_bot = config["boundary_conditions"]["c_bot"]
 
-    tol = 1e-4
-    max_iters = 30
+    tol = config["numerical"]["tol"]
+    max_iters = config["numerical"]["max_iters"]
 
     # 1. READ MESH
-    model = DiscreteModelFromFile("data/tube.msh")
+    model = DiscreteModelFromFile("meshes/tube.msh")
 
     # The tags are "inlet", "outlet", "walls", "fluid" from Gmsh
     labels = get_face_labeling(model)
@@ -173,7 +176,9 @@ function run_stationary_boussinesq_3d()
         )dΩ
         
         op_NS = AffineFEOperator(a_NS, l_NS, X_NS, Y_NS)
-        uh_new, ph_new = solve(op_NS)
+        ns_cfg = config["numerical"]["solver_NS"]
+        solver_NS = CustomIterativeSolver(Symbol(ns_cfg["type"]); precond=Symbol(ns_cfg["precond"]), reltol=ns_cfg["reltol"])
+        uh_new, ph_new = Gridap.solve(solver_NS, op_NS)
         
         τ_c_field = τ_c ∘ uh_new
         
@@ -186,7 +191,9 @@ function run_stationary_boussinesq_3d()
         l_AD(w) = ∫( 0.0 * w )dΩ
         
         op_AD = AffineFEOperator(a_AD, l_AD, Uc, Vc)
-        ch_new = solve(op_AD)
+        ad_cfg = config["numerical"]["solver_AD"]
+        solver_AD = CustomIterativeSolver(Symbol(ad_cfg["type"]); precond=Symbol(ad_cfg["precond"]), tau=ad_cfg["tau"], reltol=ad_cfg["reltol"])
+        ch_new = Gridap.solve(solver_AD, op_AD)
         
         du_norm = norm(get_free_dof_values(uh_new) .- get_free_dof_values(uh_prev))
         dc_norm = norm(get_free_dof_values(ch_new) .- get_free_dof_values(ch_prev))
@@ -215,5 +222,6 @@ function run_stationary_boussinesq_3d()
     println("Results exported to $out_file.vtu")
 end
 
-generate_tube_mesh()
-run_stationary_boussinesq_3d()
+config = JSON.parsefile("data/case_options.json")
+generate_tube_mesh(config)
+run_stationary_boussinesq_3d(config)
