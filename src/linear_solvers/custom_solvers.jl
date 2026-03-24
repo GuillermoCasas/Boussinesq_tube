@@ -4,8 +4,24 @@ using IncompleteLU
 using LinearAlgebra
 using AlgebraicMultigrid
 
+# We import the core Gridap Algebraic framework interfaces. 
+# Gridap.Algebra enforces a strict pipeline for custom linear solvers:
+# 1. symbolic_setup(solver, matrix): Performs any structural matrix analysis independent of numerical values (e.g. non-zero patterns).
+# 2. numerical_setup(symbolic_state, matrix): Generates the actual numerical inverse or preconditioner (e.g. ILU factorization).
+# 3. solve!(x, numerical_state, b): The actual application of the Krylov method iteratively.
 import Gridap.Algebra: LinearSolver, SymbolicSetup, NumericalSetup, symbolic_setup, numerical_setup, numerical_setup!, solve!
 
+"""
+    CustomIterativeSolver
+
+A Gridap-compliant wrapper struct linking the generic abstract algebraic assembly in Gridap 
+(which builds Ax = b locally element-by-element) directly to high-performance Krylov subspace 
+methods contained exclusively inside `IterativeSolvers.jl`.
+
+# Fields
+- `solver_name::Symbol`: Selects the Krylov projection space (e.g., `:gmres`, `:bicgstabl`, `:cg`).
+- `kwargs::Dict`: Stores solver boundary conditions like `:reltol` (relative tolerance) or `:precond` (preconditioner block strategy: :amg, :ilu, :jacobi).
+"""
 struct CustomIterativeSolver <: LinearSolver
     solver_name::Symbol
     kwargs::Dict
@@ -13,10 +29,12 @@ end
 
 CustomIterativeSolver(solver_name::Symbol; kwargs...) = CustomIterativeSolver(solver_name, Dict(kwargs))
 
+# Empty struct because we do not have specific sparsity-pattern symbolic algorithms to compute ahead of time.
 struct CustomSymbolicSetup{S} <: SymbolicSetup
     solver::S
 end
 
+# Holds the active evaluated matrix `A` and its corresponding preconditioner factorization `Pl`.
 mutable struct CustomNumericalSetup{S, M, P} <: NumericalSetup
     solver::S
     A::M
@@ -27,18 +45,29 @@ function Gridap.Algebra.symbolic_setup(solver::CustomIterativeSolver, A::Abstrac
     CustomSymbolicSetup(solver)
 end
 
+"""
+    build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Dict)
+
+Constructs analytical Preconditioners $P_L$ to improve the condition number of the discrete matrix $A$.
+The Krylov method essentially searches $P_L^{-1} A x = P_L^{-1} b$, radically transforming the eigen-bound scaling.
+
+# Preconditioner Types
+1. **:ilu (Incomplete LU):** Computes an approximate direct factorization (L*U ≈ A). Works beautifully on strictly diagonal dominant systems but mathematically throws `ZeroPivotException`s structurally on saddle-point approximations (like our incompressible Boussinesq Navier-Stokes block) because the pressure degrees of freedom enforce the $\\nabla \\cdot u = 0$ constraint (yielding exact $0.0$ bounds natively along the central pressure diagonals).
+2. **:amg (Algebraic Multigrid):** Recursively builds coarser functional representations of $A$, solving them symmetrically, and interpolating the smoothed residual scaling back up. Ideal for Advection-Diffusion or Poisson pressure formulations where physical interactions are purely elliptic/diffusive natively.
+3. **:jacobi:** Simply takes the inverse of the diagonal components $D^{-1}$. Computationally essentially free, but drastically scales off scaling imbalances (like pressure scalars versus velocity vector components mapping differently out of the geometry parameters).
+"""
 function build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Dict)
     precond = get(kwargs, :precond, :none)
     if precond == :ilu
-        # ILU might fail for zero-diagonal (saddle point like NS)
-        # Adding small shift to diagonal for ILU factorization if needed, or just standard ILU
+        # Attempt ILU. If the matrix is a saddle-point formulation (like Monolithic Boussinesq), 
+        # the lack of terms directly correlating pressure points exclusively to pressure points guarantees structural 0.0 diagonals.
         τ = get(kwargs, :tau, 0.01)
         try
             return ilu(A, τ=τ)
         catch e
-            println("ILU failed (often due to zero diagonals in saddle point). Falling back to Diagonal.")
+            println("ILU failed (often due to zero diagonals in saddle point). Falling back to Diagonal bounds.")
             d = diag(A)
-            # Replace structural zeros with small number
+            # Mathematically shield against division-by-zero during Jacobi extraction
             d[d .== 0] .= 1e-8
             return Diagonal(1.0 ./ d)
         end
@@ -46,7 +75,7 @@ function build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Di
         try
             return aspreconditioner(smoothed_aggregation(A))
         catch e
-            println("AMG failed. Falling back to Diagonal.")
+            println("AMG failed. Falling back to Diagonal bounds.")
             d = diag(A)
             d[d .== 0] .= 1e-8
             return Diagonal(1.0 ./ d)
@@ -56,7 +85,7 @@ function build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Di
         d[d .== 0] .= 1e-8
         return Diagonal(1.0 ./ d)
     end
-    return I
+    return I # Returns Identity preconditioning structurally otherwise
 end
 
 function Gridap.Algebra.numerical_setup(ss::CustomSymbolicSetup, A::AbstractMatrix)
@@ -69,6 +98,14 @@ function Gridap.Algebra.numerical_setup!(ns::CustomNumericalSetup, A::AbstractMa
     ns.Pl = build_preconditioner(ns.solver.solver_name, A, ns.solver.kwargs)
 end
 
+"""
+    solve!(x::AbstractVector, ns::CustomNumericalSetup, b::AbstractVector)
+
+Evaluates the primary iterative Krylov root vector space algorithms finding an optimal scalar minimum.
+- **GMRES:** General Minimum Residual. Stores all orthogonalized conjugate vectors dynamically minimizing arbitrarily ill-conditioned, non-symmetrical equations. (High memory cost structurally).
+- **BiCGStabl:** Biconjugate Gradient Stabilized. Avoids keeping all basis vectors natively, relying strictly on bi-orthogonal inner products to solve massively asymmetric formulations (ideal for Advection components).
+- **CG:** Conjugate Gradient. Only converges if matrix strictly SPD (Symmetric Positive-Definite), which our native Navier-Stokes is NOT functionally explicitly.
+"""
 function Gridap.Algebra.solve!(x::AbstractVector, ns::CustomNumericalSetup, b::AbstractVector)
     solver_name = ns.solver.solver_name
     kwargs_pass = copy(ns.solver.kwargs)
