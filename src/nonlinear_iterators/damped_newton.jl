@@ -7,19 +7,19 @@ using LinearAlgebra
     DampedNewtonSolver <: NonlinearSolver
 
 A custom extension of the Gridap `NonlinearSolver` interface that implements a robust Damped Newton-Raphson algorithm.
-Standard Newton-Raphson attempts to find the root of the residual equation $R(x) = 0$ by linearizing the space 
-via the Jacobian $J = \\frac{\\partial R}{\\partial x}$ and stepping $J \\Delta x = -R(x)$.
+Standard Newton-Raphson attempts to find the root of the residual equation R(x) = 0 by linearizing the space 
+via the Jacobian J = dR/dx and stepping J \\Delta x = -R(x).
 
 However, continuous physics environments (like high Reynolds/Péclet limits) produce highly nonlinear boundaries.
-A standard full-step Newton method ($x_{new} = x_{old} + \\Delta x$) often diverges. 
+A standard full-step Newton method (x_new = x_old + \\Delta x) often diverges. 
 This Damped solver implements an **Armijo Backtracking Line Search**: 
-It tests fractional steps $\\alpha \\Delta x$ to guarantee that the new residual norm practically decreases before moving.
+It tests fractional steps \\alpha \\Delta x to guarantee that the new residual norm practically decreases before moving.
 
 # Fields
-- `ls::LinearSolver`: The underlying algebraic solver (e.g., FGMRES or BiCGStab) used to evaluate $J \\Delta x = -b$.
-- `tol::Float64`: The strictly required $L^2$ outer residual norm limit.
+- `ls::LinearSolver`: The underlying algebraic solver (e.g., FGMRES or BiCGStab) used to evaluate J \\Delta x = -b.
+- `tol::Float64`: The strictly required L_2 outer residual norm limit.
 - `max_iters::Int`: Total allowable outer Newton jumps.
-- `backtrack_factor::Float64`: The scaling reduction factor $\\tau$ applied if a step fails ($0 < \\tau < 1$, typically 0.5).
+- `backtrack_factor::Float64`: The scaling reduction factor \\tau applied if a step fails (0 < \\tau < 1, typically 0.5).
 - `min_alpha::Float64`: The lowest operational limit for the linesearch bound before giving up on a specific direction.
 """
 struct DampedNewtonSolver <: NonlinearSolver
@@ -39,14 +39,14 @@ end
 
 Overrides the generic `Gridap.solve!` method. 
 Gridap abstracts the complex partial differential equations natively into a generic `NonlinearOperator` (`op`). 
-This guarantees code isolation; the solver does not need to know the physics, it simply queries `op` for $b$ and $J$.
+This guarantees code isolation; the solver does not need to know the physics, it simply queries op for b and J.
 
 # Mathematical Routine
-1. Evaluate $b = R(x)$ and test initial tolerance limits.
-2. Evaluate local stiffness matrix $J = \\nabla_x R(x)$.
-3. Solve implicitly for the direction $\\Delta x$ where $J \\Delta x = -b$.
-4. Evaluate a candidate point map $x_{new} = x + \\alpha \\Delta x$. 
-5. If the resulting norm $||R(x_{new})|| > ||R(x_{old})||$, recursively backtrack $\\alpha \\gets \\alpha \\cdot \\tau$.
+1. Evaluate b = R(x) and test initial tolerance limits.
+2. Evaluate local stiffness matrix J = \\nabla_x R(x).
+3. Solve implicitly for the direction \\Delta x where J \\Delta x = -b.
+4. Evaluate a candidate point map x_new = x + \\alpha \\Delta x. 
+5. If the resulting norm ||R(x_new)|| > ||R(x_old)||, recursively backtrack \\alpha = \\alpha * \\tau.
 6. Repeat until the physical space converges.
 """
 function Gridap.Algebra.solve!(x::AbstractVector, nls::DampedNewtonSolver, op::NonlinearOperator)

@@ -4,6 +4,53 @@ using IncompleteLU
 using LinearAlgebra
 using AlgebraicMultigrid
 
+import Base: \
+
+struct NavierStokesSchurPreconditioner
+    ml_A
+    ilu_S
+    B
+    BT
+    inv_diag_A
+    n_u::Int
+end
+
+function NavierStokesSchurPreconditioner(M::Gridap.Algebra.BlockMatrix, n_u::Int; tau=0.01)
+    A = M.blocks[1,1]
+    BT = M.blocks[1,2]
+    B = M.blocks[2,1]
+    C = M.blocks[2,2]
+    
+    # State-of-the-art Algebraic Multigrid strictly bounding the Velocity Convection-Diffusion block!
+    ml_A = aspreconditioner(smoothed_aggregation(A))
+    
+    # SIMPLE Block Schur Approximation: S = C - B * diag(A)^-1 * B^T
+    inv_diag_A = 1.0 ./ diag(A)
+    S = C - B * sparse(Diagonal(inv_diag_A)) * BT
+    
+    # Pressure Schur Poisson block efficiently bounded by IncompleteLU natively!
+    ilu_S = ilu(S, τ=tau)
+    
+    return NavierStokesSchurPreconditioner(ml_A, ilu_S, B, BT, inv_diag_A, n_u)
+end
+
+function \(P::NavierStokesSchurPreconditioner, v::AbstractVector)
+    # Forward block execution dynamically scaling the Saddle Point limits analytically
+    v_u = v[1:P.n_u]
+    v_p = v[P.n_u+1:end]
+    
+    # 1. Precondition Schur Pressure
+    y_p = P.ilu_S \ v_p
+    
+    # 2. Update Velocity RHS
+    v_u_mod = v_u - P.BT * y_p
+    
+    # 3. Precondition Velocity using AMG
+    y_u = P.ml_A \ v_u_mod
+    
+    return [y_u; y_p]
+end
+
 # We import the core Gridap Algebraic framework interfaces. 
 # Gridap.Algebra enforces a strict pipeline for custom linear solvers:
 # 1. symbolic_setup(solver, matrix): Performs any structural matrix analysis independent of numerical values (e.g. non-zero patterns).
@@ -48,13 +95,13 @@ end
 """
     build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Dict)
 
-Constructs analytical Preconditioners $P_L$ to improve the condition number of the discrete matrix $A$.
-The Krylov method essentially searches $P_L^{-1} A x = P_L^{-1} b$, radically transforming the eigen-bound scaling.
+Constructs analytical Preconditioners P_L to improve the condition number of the discrete matrix A.
+The Krylov method essentially searches P_L^{-1} A x = P_L^{-1} b, radically transforming the eigen-bound scaling.
 
 # Preconditioner Types
-1. **:ilu (Incomplete LU):** Computes an approximate direct factorization (L*U ≈ A). Works beautifully on strictly diagonal dominant systems but mathematically throws `ZeroPivotException`s structurally on saddle-point approximations (like our incompressible Boussinesq Navier-Stokes block) because the pressure degrees of freedom enforce the $\\nabla \\cdot u = 0$ constraint (yielding exact $0.0$ bounds natively along the central pressure diagonals).
-2. **:amg (Algebraic Multigrid):** Recursively builds coarser functional representations of $A$, solving them symmetrically, and interpolating the smoothed residual scaling back up. Ideal for Advection-Diffusion or Poisson pressure formulations where physical interactions are purely elliptic/diffusive natively.
-3. **:jacobi:** Simply takes the inverse of the diagonal components $D^{-1}$. Computationally essentially free, but drastically scales off scaling imbalances (like pressure scalars versus velocity vector components mapping differently out of the geometry parameters).
+1. **:ilu (Incomplete LU):** Computes an approximate direct factorization (L*U ≈ A). Works beautifully on strictly diagonal dominant systems but mathematically throws `ZeroPivotException`s structurally on saddle-point approximations (like our incompressible Boussinesq Navier-Stokes block) because the pressure degrees of freedom enforce the div(u) = 0 constraint (yielding exact 0.0 bounds natively along the central pressure diagonals).
+2. **:amg (Algebraic Multigrid):** Recursively builds coarser functional representations of A, solving them symmetrically, and interpolating the smoothed residual scaling back up. Ideal for Advection-Diffusion or Poisson pressure formulations where physical interactions are purely elliptic/diffusive natively.
+3. **:jacobi:** Simply takes the inverse of the diagonal components D^{-1}. Computationally essentially free, but drastically scales off scaling imbalances (like pressure scalars versus velocity vector components mapping differently out of the geometry parameters).
 """
 function build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Dict)
     precond = get(kwargs, :precond, :none)
@@ -80,6 +127,10 @@ function build_preconditioner(solver_name::Symbol, A::AbstractMatrix, kwargs::Di
             d[d .== 0] .= 1e-8
             return Diagonal(1.0 ./ d)
         end
+    elseif precond == :schur
+        n_u = get(kwargs, :n_u, size(A, 1) ÷ 2)
+        tau = get(kwargs, :tau, 0.01) # Assuming tau might be used for Schur as well
+        return NavierStokesSchurPreconditioner(A, n_u; tau=tau)
     elseif precond == :jacobi
         d = diag(A)
         d[d .== 0] .= 1e-8
@@ -111,6 +162,7 @@ function Gridap.Algebra.solve!(x::AbstractVector, ns::CustomNumericalSetup, b::A
     kwargs_pass = copy(ns.solver.kwargs)
     delete!(kwargs_pass, :precond)
     delete!(kwargs_pass, :tau)
+    delete!(kwargs_pass, :n_u)
     
     kwargs_pass[:log] = true
     kwargs_pass[:verbose] = true

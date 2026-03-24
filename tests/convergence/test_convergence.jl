@@ -24,12 +24,17 @@ function run_convergence()
     h_vals = config["test_options"]["mesh_sizes"]
     h_ref = config["test_options"]["reference_mesh"]
 
+    mkpath("results")
+    mkpath("meshes")
+
     println("Generating Reference Mesh (h_ref = $h_ref)")
     config["geometry"]["mesh_size"] = h_ref
     ref_msh = "meshes/tube_ref.msh"
     generate_tube_mesh(config, ref_msh)
     
     u_ref, p_ref, c_ref, Ω_ref, dΩ_ref = run_simulation(config, ref_msh; out_vtk="results/tube_ref")
+    export_timer_summary("results/timing_tube_ref.txt", "Timing Summary (h_ref=$h_ref)")
+    reset_timer!()
 
     # Fixed core points to avoid boundary evaluation issues
     pts = Point{3,Float64}[]
@@ -72,6 +77,8 @@ function run_convergence()
         generate_tube_mesh(config, msh_path)
         
         uh, ph, ch, Ω, dΩ = run_simulation(config, msh_path; out_vtk="results/tube_$h")
+        export_timer_summary("results/timing_tube_$(h).txt", "Timing Summary (h=$h)")
+        reset_timer!()
         
         e_u_sum = 0.0; e_p_sum = 0.0; e_c_sum = 0.0
         v_count = 0

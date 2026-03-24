@@ -27,6 +27,8 @@ function run_single()
     generate_tube_mesh(config, msh_path)
     
     uh, ph, ch, Ω, dΩ = run_simulation(config, msh_path; out_vtk="results/tube_single")
+    export_timer_summary("results/timing_tube_single.txt", "Timing Summary (Single Run h=$h)")
+    print_timer_summary()
     println("Single run test completed successfully.")
 end
 
