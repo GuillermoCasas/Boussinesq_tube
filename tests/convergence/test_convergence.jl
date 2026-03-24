@@ -32,8 +32,13 @@ function run_convergence()
     ref_msh = "meshes/tube_ref.msh"
     generate_tube_mesh(config, ref_msh)
     
+    prof_file = "results/profiling_summary.txt"
+    if isfile(prof_file)
+        rm(prof_file)
+    end
+    
     u_ref, p_ref, c_ref, Ω_ref, dΩ_ref = run_simulation(config, ref_msh; out_vtk="results/tube_ref")
-    export_timer_summary("results/timing_tube_ref.txt", "Timing Summary (h_ref=$h_ref)")
+    export_timer_summary(prof_file, "Timing Summary (h_ref=$h_ref)")
     reset_timer!()
 
     # Fixed core points to avoid boundary evaluation issues
@@ -77,7 +82,7 @@ function run_convergence()
         generate_tube_mesh(config, msh_path)
         
         uh, ph, ch, Ω, dΩ = run_simulation(config, msh_path; out_vtk="results/tube_$h")
-        export_timer_summary("results/timing_tube_$(h).txt", "Timing Summary (h=$h)")
+        export_timer_summary(prof_file, "Timing Summary (h=$h)")
         reset_timer!()
         
         e_u_sum = 0.0; e_p_sum = 0.0; e_c_sum = 0.0

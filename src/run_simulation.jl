@@ -10,9 +10,7 @@ using LinearAlgebra
 include("timer_utils.jl")
 using .TimerUtils
 
-include("linear_solvers/custom_solvers.jl")
 include("nonlinear_iterators/damped_newton.jl")
-include("nonlinear_iterators/solve_newton.jl")
 include("nonlinear_iterators/solve_picard.jl")
 include("nonlinear_iterators/solve_staggered_newton.jl")
 
@@ -82,8 +80,14 @@ function generate_tube_mesh(config::Dict, msh_file::String)
 end
 
 
-function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, Nothing}=nothing, parts=nothing)
-    println("\nLoading the stationary Boussinesq model in 3D from $msh_file ...")
+function run_simulation(config::Dict, msh_file::Union{String, Nothing}=nothing; 
+                        out_vtk::Union{String, Nothing}=nothing, 
+                        parts=nothing, 
+                        is_mms::Bool=false,
+                        u_exact=nothing, force_u=nothing,
+                        c_exact=nothing, force_c=nothing)
+
+    println("\nLoading the Boussinesq model (is_mms=$is_mms)...")
 
     R = config["geometry"]["R"]
     rho0 = config["physics"]["rho0"]
@@ -100,13 +104,25 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
     c_top = config["boundary_conditions"]["c_top"]
     c_mid = config["boundary_conditions"]["c_mid"]
     c_bot = config["boundary_conditions"]["c_bot"]
+    h_val = config["geometry"]["mesh_size"]
 
     local model
     @timeit "Model Loading" begin
-        if parts === nothing
-            model = DiscreteModelFromFile(msh_file)
+        if is_mms
+            L_mms = get(config["geometry"], "L", 1.0)
+            domain = (0.0, L_mms, 0.0, L_mms, 0.0, L_mms)
+            cells = (Int(round(L_mms/h_val)), Int(round(L_mms/h_val)), Int(round(L_mms/h_val)))
+            if parts === nothing
+                model = CartesianDiscreteModel(domain, cells)
+            else
+                model = CartesianDiscreteModel(parts, domain, cells)
+            end
         else
-            model = GmshDiscreteModel(parts, msh_file)
+            if parts === nothing
+                model = DiscreteModelFromFile(msh_file)
+            else
+                model = GmshDiscreteModel(parts, msh_file)
+            end
         end
     end
 
@@ -117,32 +133,37 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
     local Vu, Vp, Vc, Uu, Up, Uc
     @timeit "FESpace Allocation" begin
         Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, degree_u),
-                         conformity=:H1, dirichlet_tags=["inlet", "walls"])
+                         conformity=:H1, dirichlet_tags=(is_mms ? "boundary" : ["inlet", "walls"]))
         Vp = TestFESpace(model, ReferenceFE(lagrangian, Float64, degree_p), conformity=:H1) 
         Vc = TestFESpace(model, ReferenceFE(lagrangian, Float64, degree_c),
-                         conformity=:H1, dirichlet_tags=["inlet"])
+                         conformity=:H1, dirichlet_tags=(is_mms ? "boundary" : ["inlet"]))
 
-        function u_in(x)
-            y = x[2]
-            z = x[3]
-            r2 = y^2 + z^2
-            val = U_max * max(0.0, 1.0 - r2/(R^2))
-            return VectorValue(val, 0.0, 0.0)
-        end
-        u_wall(x) = VectorValue(0.0, 0.0, 0.0)
-
-        Uu = TrialFESpace(Vu, [u_in, u_wall])
-        Up = TrialFESpace(Vp)
-
-        function c_in_func(x)
-            z = x[3]
-            if z < -R/3 return c_bot
-            elseif z < R/3 return c_mid
-            else return c_top
+        if is_mms
+            Uu = TrialFESpace(Vu, u_exact)
+            Up = TrialFESpace(Vp)
+            Uc = TrialFESpace(Vc, c_exact)
+        else
+            function u_in(x)
+                y = x[2]
+                z = x[3]
+                r2 = y^2 + z^2
+                val = U_max * max(0.0, 1.0 - r2/(R^2))
+                return VectorValue(val, 0.0, 0.0)
             end
-        end
+            u_wall(x) = VectorValue(0.0, 0.0, 0.0)
 
-        Uc = TrialFESpace(Vc, [c_in_func])
+            Uu = TrialFESpace(Vu, [u_in, u_wall])
+            Up = TrialFESpace(Vp)
+
+            function c_in_func(x)
+                z = x[3]
+                if z < -R/3 return c_bot
+                elseif z < R/3 return c_mid
+                else return c_top
+                end
+            end
+            Uc = TrialFESpace(Vc, [c_in_func])
+        end
     end
 
     degree_quad = 4
@@ -152,8 +173,6 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
         dΩ = Measure(Ω, degree_quad)
     end
 
-    h_val = config["geometry"]["mesh_size"]
-
     norm_u(u) = sqrt(u ⋅ u + 1e-12)
     τ_m(u) = 1.0 / sqrt( (2.0 * rho0 * norm_u(u) / h_val)^2 + (4.0 * mu / h_val^2)^2 )
     τ_c(u) = 1.0 / sqrt( (2.0 * norm_u(u) / h_val)^2 + (4.0 * D / h_val^2)^2 )
@@ -161,24 +180,19 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
     strategy = get(config["numerical"], "nonlinear_strategy", "staggered")
     ns_cfg = config["numerical"]["solver_NS"]
 
-    function _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, strategy)
-        if strategy == "monolithic"
-            println("\n=======================================================")
-            println("=> SOLVER ARCHITECTURE: MONOLITHIC (Damped Newton)")
-            println("=======================================================\n")
-            X_coup = MultiFieldFESpace([Uu, Up, Uc])
-            Y_coup = MultiFieldFESpace([Vu, Vp, Vc])
-            return solve_boussinesq_newton(config, X_coup, Y_coup, dΩ, τ_m, τ_c, phys_params, Up, Vp)
-        elseif strategy == "staggered_newton"
+    c_in_pass = is_mms ? c_exact : c_in_func
+
+    function _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func_pass, τ_m, τ_c, phys_params, strategy)
+        if strategy == "staggered_newton"
             println("\n=======================================================")
             println("=> SOLVER ARCHITECTURE: STAGGERED NEWTON (Decoupled NS Jacobian)")
             println("=======================================================\n")
-            return solve_boussinesq_staggered_newton(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params)
+            return solve_boussinesq_staggered_newton(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func_pass, τ_m, τ_c, phys_params, force_u, force_c)
         else
             println("\n=======================================================")
             println("=> SOLVER ARCHITECTURE: STAGGERED (Decoupled Picard)")
             println("=======================================================\n")
-            return solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params)
+            return solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func_pass, τ_m, τ_c, phys_params, force_u, force_c)
         end
     end
 
@@ -197,7 +211,7 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
                      "-fieldsplit_1_ksp_type preonly -fieldsplit_1_pc_type lsc"
                      
         uh_new, ph_new, ch_new = GridapPETSc.with(args=split(petsc_opts)) do
-            _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, strategy)
+            _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
         end
     elseif get(ns_cfg, "type", "") == "petsc"
         X_NS = MultiFieldFESpace([Uu, Up])
@@ -205,16 +219,21 @@ function run_simulation(config::Dict, msh_file::String; out_vtk::Union{String, N
         
         petsc_opts = "-ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps"
         uh_new, ph_new, ch_new = GridapPETSc.with(args=split(petsc_opts)) do
-            _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, strategy)
+            _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
         end
     elseif get(ns_cfg, "type", "") == "GridapSolvers"
         X_NS = MultiFieldFESpace([Uu, Up]; style=Gridap.MultiField.BlockMultiFieldStyle())
         Y_NS = MultiFieldFESpace([Vu, Vp]; style=Gridap.MultiField.BlockMultiFieldStyle())
-        uh_new, ph_new, ch_new = _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, strategy)
+        # Provide exactly explicit global PETSc context securely mapping BoomerAMG dynamically explicitly inside nested blocks over MPI.
+        petsc_opts = "-u_ksp_type fgmres -u_ksp_rtol 1e-4 -u_pc_type gamg -u_pc_gamg_type agg -u_pc_gamg_sym_graph true " *
+                     "-p_ksp_type cg -p_ksp_rtol 1e-4 -p_pc_type jacobi"
+        uh_new, ph_new, ch_new = GridapPETSc.with(args=split(petsc_opts)) do
+            _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
+        end
     else
         X_NS = MultiFieldFESpace([Uu, Up])
         Y_NS = MultiFieldFESpace([Vu, Vp])
-        uh_new, ph_new, ch_new = _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, strategy)
+        uh_new, ph_new, ch_new = _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
     end
 
     @timeit "VTK IO Dump" begin

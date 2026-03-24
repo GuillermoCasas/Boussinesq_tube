@@ -35,6 +35,34 @@ function reset_timer!()
     end
 end
 
+function format_duration(t_sec::Float64)
+    days = floor(Int, t_sec / 86400)
+    rem = t_sec - days * 86400
+    hours = floor(Int, rem / 3600)
+    rem -= hours * 3600
+    mins = floor(Int, rem / 60)
+    secs = rem - mins * 60
+    
+    parts = String[]
+    if days > 0
+        push!(parts, "$(days) days")
+    end
+    if days > 0 || hours > 0
+        push!(parts, "$(hours)h")
+    end
+    if days > 0 || hours > 0 || mins > 0
+        push!(parts, "$(mins)min")
+    end
+    
+    sec_str = "$(round(secs, digits=3))s"
+    
+    if isempty(parts)
+        return sec_str
+    else
+        return join(parts, ", ") * " and " * sec_str
+    end
+end
+
 function _generate_summary_string(title="ROUTINE PERFORMANCE & TIMING SUMMARY REPORT")
     total_time = isempty(timings) ? 0.0 : sum(values(timings))
     s = "\n" * "="^65 * "\n"
@@ -51,7 +79,7 @@ function _generate_summary_string(title="ROUTINE PERFORMANCE & TIMING SUMMARY RE
         s *= rpad(name, 35) * rpad(string(c), 10) * rpad(t_str, 12) * rel_str * "\n"
     end
     s *= "-"^65 * "\n"
-    s *= rpad("Total Tracked Physics Execution", 45) * string(round(total_time, digits=3), " s\n")
+    s *= rpad("Total Tracked Physics Execution", 40) * format_duration(total_time) * "\n"
     s *= "="^65 * "\n"
     return s
 end
@@ -61,7 +89,7 @@ function print_timer_summary(title="ROUTINE PERFORMANCE & TIMING SUMMARY REPORT"
 end
 
 function export_timer_summary(filepath::String, title="ROUTINE PERFORMANCE & TIMING SUMMARY REPORT")
-    open(filepath, "w") do f
+    open(filepath, "a") do f
         write(f, _generate_summary_string(title))
     end
 end

@@ -20,7 +20,7 @@ we decouple the physics sequentially:
 Because pure Galerkin finite elements fail and produce massive node-to-node oscillations at high Péclet/Reynolds numbers (convection-dominant flows), 
 we bias the test formulation physically upwind. The \\tau terms evaluate the mesh size h and velocity scalar norm to construct exact artificial element diffusion arrays structurally parallel to the analytical velocity field.
 """
-function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, solver_NS, solver_AD)
+function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, solver_NS, solver_AD, force_u, force_c)
     rho0 = phys_params.rho0
     mu = phys_params.mu
     D = phys_params.D
@@ -47,11 +47,23 @@ function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, 
         τ_m_field = τ_m ∘ uh_prev
         
         # Lagged Buoyancy: Assumes thermal/solute field is effectively constant from the prior step
-        body_force = rho0 * g_mag * beta_c * (ch_prev - c_ref) * e_g
+        if force_u === nothing
+            body_force = rho0 * g_mag * beta_c * (ch_prev - c_ref) * e_g
+        else
+            body_force = force_u
+        end
         
         # Establish the Algebraic Artificial Compressibility constant `ϵ` dynamically.
         # Natively appending `ϵ * p * q` across both the LHS matrix array and evaluating it linearly over `ϵ * p_prev * q` on the RHS safely preserves exact spatial continuity limit on Convergence!
         ϵ = 1e-8
+        
+        # Add a strict physical compressibility boundary to softly pin the zero-mean pressure nullspace without polluting the spatial order massively
+        ϵ_phys = 1e-7
+        
+        # Augmented Lagrangian Mathematical Projector mapping exactly velocity divergences onto the Pressure Taylor-Hood bounds explicitly matching LBB inf-sup conditions conservatively properly dynamically safely smoothly natively seamlessly properly gracefully stably elegantly appropriately safely smoothly nicely practically optimally
+        α = 1e3
+        reffe_p = ReferenceFE(lagrangian, Float64, 1)
+        Π_Qh = GridapSolvers.LocalProjectionMap(divergence, reffe_p, 4)
         
         # Formulate linearized Affine Weak formulation (Bilinear 'a_NS', linear 'l_NS')
         a_NS(X, Y) = ∫( 
@@ -59,7 +71,9 @@ function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, 
             2 * mu * (ε(X[1]) ⊙ ε(Y[1])) -      # Diffusion (Stress strain tensor)
             X[2] * (∇ ⋅ Y[1]) +                 # Pressure divergence gradient
             Y[2] * (∇ ⋅ X[1]) +                 # Incompressibility constraint
-            ϵ * X[2] * Y[2] +                   # ϵ Artificial Compressibility matrix map boundary explicitly required natively for ILU
+            ϵ * X[2] * Y[2] +                   # Algebraic diagonal shift natively for ILU
+            ϵ_phys * X[2] * Y[2] +              # Physical penalty explicitly pinning the pressure average to zero
+            α * (∇ ⋅ Y[1]) ⋅ Π_Qh(X[1]) +       # Augmented Lagrangian formulation mapping natively over LBB pressure grids structurally bounding saddle point zeroes reliably!
             # SUPG formulation testing along the streamline
             τ_m_field * (rho0 * (uh_prev ⋅ ∇(Y[1]))) ⋅ (rho0 * (uh_prev ⋅ ∇(X[1])) + ∇(X[2]))
         )dΩ
@@ -67,7 +81,7 @@ function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, 
         l_NS(Y) = ∫( 
             body_force ⋅ Y[1] + 
             τ_m_field * (rho0 * (uh_prev ⋅ ∇(Y[1]))) ⋅ body_force +
-            ϵ * ph_prev * Y[2]                  # Exact mathematical formulation recovery restoring precise 𝒪(h^3) dynamics
+            ϵ * ph_prev * Y[2]                  # Recovery of the artificial iterative ϵ shift 
         )dΩ
         
         local op_NS
@@ -87,7 +101,12 @@ function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, 
             τ_c_field * (uh_new ⋅ ∇(w)) * (uh_new ⋅ ∇(c)) # SUPG stabilization along the streamline
         )dΩ
         
-        l_AD(w) = ∫( 0.0 * w )dΩ
+        local l_AD
+        if force_c === nothing
+            l_AD = w -> ∫( 0.0 * w )dΩ
+        else
+            l_AD = w -> ∫( force_c * w + τ_c_field * (uh_new ⋅ ∇(w)) * force_c )dΩ
+        end
         
         local op_AD
         @timeit "Assemble Advection-Diffusion Matrix" begin
@@ -124,7 +143,7 @@ function _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, 
     return uh_new, ph_new, ch_new
 end
 
-function solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params)
+function solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, force_u=nothing, force_c=nothing)
     ns_cfg = config["numerical"]["solver_NS"]
     
     n_u = Gridap.FESpaces.num_free_dofs(Uu)
@@ -135,14 +154,22 @@ function solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_f
     elseif ns_cfg["type"] == "lu"
         solver_NS = LUSolver()
     elseif ns_cfg["type"] == "GridapSolvers"
-        # 1. State-of-the-art velocity scalar preconditioning natively evaluated by Algebraic Multigrid limits
-        solver_u = CustomIterativeSolver(:bicgstabl; precond=:amg, reltol=1e-4)
+        function get_ksp_setup(prefix)
+            return (ksp) -> begin
+                GridapPETSc.PETSC.KSPSetOptionsPrefix(ksp[], prefix)
+                GridapPETSc.PETSC.KSPSetFromOptions(ksp[])
+                GridapPETSc.PETSC.KSPSetUp(ksp[])
+            end
+        end
+        # 1. State-of-the-art velocity scalar preconditioning natively evaluated by Algebraic Multigrid limits via PETSc BoomerAMG
+        solver_u = PETScLinearSolver(get_ksp_setup("u_"))
         
         # 2. Approximate Mass Matrix Schur limits identically locally
-        solver_p = CustomIterativeSolver(:cg; precond=:jacobi, reltol=1e-4)
+        solver_p = PETScLinearSolver(get_ksp_setup("p_"))
 
+        α = 1e3
         bblocks  = [GridapSolvers.BlockSolvers.LinearSystemBlock()    GridapSolvers.BlockSolvers.LinearSystemBlock();
-                    GridapSolvers.BlockSolvers.LinearSystemBlock()    GridapSolvers.BlockSolvers.BiformBlock((p,q) -> ∫( 1.0 * p * q )dΩ, Up, Up)]
+                    GridapSolvers.BlockSolvers.LinearSystemBlock()    GridapSolvers.BlockSolvers.BiformBlock((p,q) -> ∫( -(1.0/α) * p * q )dΩ, Up, Up)]
         
         coeffs = [1.0 1.0;
                   0.0 1.0]  
@@ -163,5 +190,5 @@ function solve_boussinesq_picard(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_f
         solver_AD = CustomIterativeSolver(Symbol(ad_cfg["type"]); precond=Symbol(ad_cfg["precond"]), reltol=get(ad_cfg, "reltol", 1e-4), tau=get(ad_cfg, "tau", 0.01))
     end
     
-    return _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, solver_NS, solver_AD)
+    return _picard_inner_loop(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, solver_NS, solver_AD, force_u, force_c)
 end
