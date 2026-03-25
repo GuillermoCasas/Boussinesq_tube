@@ -7,6 +7,10 @@ using LinearAlgebra
 Executes the high-performance Staggered Newton architecture:
 1. Solves the Navier-Stokes field using a full `DampedNewtonSolver` (Automatic Differentiation generates the exact NS Jacobian without the ill-conditioned 3x3 (u,p,c) bounds).
 2. Given the quadratically converged velocity u_new, solves the Solute Advection-Diffusion field via a single, precise Krylov subspace linear jump (since AD is strictly linear geographically).
+
+This formulation is directly linked to the accompanying theory paper, which discusses 
+stabilizing the saddle-point system via Augmented Lagrangian methods and block-preconditioning 
+using a Variational Multiscale (VMS) Algebraic Subgrid Scale (ASGS) stabilized equal-order P1/P1 formulation.
 """
 function solve_boussinesq_staggered_newton(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_func, τ_m, τ_c, phys_params, force_u=nothing, force_c=nothing)
     rho0 = phys_params.rho0

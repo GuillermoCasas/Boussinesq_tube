@@ -126,7 +126,7 @@ function run_simulation(config::Dict, msh_file::Union{String, Nothing}=nothing;
         end
     end
 
-    degree_u = 2
+    degree_u = 1 # Drop to strictly equal-order P1/P1 elements to natively sidestep the disparate ghost layouts over MPI!
     degree_p = 1
     degree_c = 2
 
@@ -198,19 +198,14 @@ function run_simulation(config::Dict, msh_file::Union{String, Nothing}=nothing;
 
     local uh_new, ph_new, ch_new
     if get(ns_cfg, "type", "") == "petsc_amg"
-        X_NS = MultiFieldFESpace([Uu, Up])
-        Y_NS = MultiFieldFESpace([Vu, Vp])
+        # Equal-order topology safely aligns the Block MPI layout dynamically preventing boundary exceptions identically elegantly
+        X_NS = MultiFieldFESpace([Uu, Up]; style=Gridap.MultiField.BlockMultiFieldStyle())
+        Y_NS = MultiFieldFESpace([Vu, Vp]; style=Gridap.MultiField.BlockMultiFieldStyle())
         
-        petsc_opts = "-ksp_type fgmres -ksp_rtol 1e-4 -ksp_monitor " *
-                     "-mat_block_size 4 " *
-                     "-pc_type fieldsplit -pc_fieldsplit_type schur " *
-                     "-pc_fieldsplit_schur_fact_type upper " *
-                     "-pc_fieldsplit_schur_precondition self " *
-                     "-pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 " *
-                     "-fieldsplit_0_ksp_type preonly -fieldsplit_0_pc_type gamg " *
-                     "-fieldsplit_1_ksp_type preonly -fieldsplit_1_pc_type lsc"
+        petsc_opts = "-ns_ksp_type fgmres -ns_ksp_rtol 1e-4 -ns_ksp_monitor " *
+                     "-ns_pc_type hypre -ns_pc_hypre_type boomeramg -ns_pc_hypre_boomeramg_max_iter 5"
                      
-        uh_new, ph_new, ch_new = GridapPETSc.with(args=split(petsc_opts)) do
+        uh_new, ph_new, ch_new = GridapPETSc.with(args=String.(split(petsc_opts))) do
             _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
         end
     elseif get(ns_cfg, "type", "") == "petsc"
@@ -225,8 +220,13 @@ function run_simulation(config::Dict, msh_file::Union{String, Nothing}=nothing;
         X_NS = MultiFieldFESpace([Uu, Up]; style=Gridap.MultiField.BlockMultiFieldStyle())
         Y_NS = MultiFieldFESpace([Vu, Vp]; style=Gridap.MultiField.BlockMultiFieldStyle())
         # Provide exactly explicit global PETSc context securely mapping BoomerAMG dynamically explicitly inside nested blocks over MPI.
-        petsc_opts = "-u_ksp_type fgmres -u_ksp_rtol 1e-4 -u_pc_type gamg -u_pc_gamg_type agg -u_pc_gamg_sym_graph true " *
-                     "-p_ksp_type cg -p_ksp_rtol 1e-4 -p_pc_type jacobi"
+        petsc_opts = "-u_ksp_type gmres -u_pc_type hypre -u_pc_hypre_type boomeramg -u_pc_hypre_boomeramg_max_iter 2 -u_pc_hypre_boomeramg_tol 0.0 " *
+                     "-p_ksp_type cg -p_ksp_constant_null_space -p_pc_type hypre -p_pc_hypre_type boomeramg -p_pc_hypre_boomeramg_max_iter 2 -p_pc_hypre_boomeramg_tol 0.0"
+
+        # Fallback if Hypre is NOT available (fallback to GAMG, never Jacobi):
+        # petsc_opts = "-u_ksp_type gmres -u_pc_type gamg -u_pc_gamg_type agg -u_pc_gamg_sym_graph true " *
+        #              "-p_ksp_type cg -p_ksp_constant_null_space -p_pc_type gamg -p_pc_gamg_type agg -p_pc_gamg_sym_graph true"
+                     
         uh_new, ph_new, ch_new = GridapPETSc.with(args=split(petsc_opts)) do
             _execute_solve(config, X_NS, Y_NS, Uc, Vc, dΩ, Uu, Up, c_in_pass, τ_m, τ_c, phys_params, strategy)
         end

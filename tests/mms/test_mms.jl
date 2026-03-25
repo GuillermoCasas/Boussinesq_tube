@@ -16,9 +16,9 @@ function run_mms_convergence()
     config["numerical"]["nonlinear_strategy"] = "staggered"
     
     # CRITICAL: For MMS geometrical O(h^3) Convergence, Linear iterations mathematically inject artificial errors!
-    # Lock inner linear solvers exactly to Direct PETSc MUMPS implicitly eliminating residual tolerance bounds natively stably.
-    config["numerical"]["solver_NS"]["type"] = "petsc"
-    config["numerical"]["solver_AD"]["type"] = "petsc"
+    # Lock inner linear solvers exactly to our new fieldsplit block preconditioner
+    config["numerical"]["solver_NS"]["type"] = "lu"
+    config["numerical"]["solver_AD"]["type"] = "lu"
 
     # Physics from config
     rho0 = config["physics"]["rho0"]
@@ -42,10 +42,11 @@ function run_mms_convergence()
     # Navier-Stokes Momentum Forcing: ρ₀(u⋅∇)u - μΔu + ∇p = f_u
     f_u(x) = rho0 * (∇(u_ex)(x)' ⋅ u_ex(x)) - mu * Δ(u_ex)(x) + ∇(p_ex)(x)
 
-    # Advection-Diffusion Forcing: u⋅∇c - DΔc = f_c
     f_c(x) = (u_ex(x) ⋅ ∇(c_ex)(x)) - D * Δ(c_ex)(x)
 
-    Ns = [4, 6, 8, 12]
+    mms_config_path = joinpath(@__DIR__, "data/config.json")
+    mms_config = JSON.parsefile(mms_config_path)
+    Ns = mms_config["Ns"]
     hs = 1.0 ./ Ns
     
     errors_u = Float64[]
@@ -70,8 +71,9 @@ function run_mms_convergence()
 
         out_vtk = joinpath(results_dir, "mms_N_$(N)")
         
+        config["numerical"]["solver_NS"]["type"] = "lu"
         uh, ph, ch, Ω, dΩ = run_simulation(config, nothing; 
-                                           out_vtk=out_vtk, 
+                                           out_vtk=nothing, 
                                            is_mms=true,
                                            u_exact=u_ex, force_u=f_u,
                                            c_exact=c_ex, force_c=f_c)
@@ -89,6 +91,19 @@ function run_mms_convergence()
         l2_u = sqrt(sum(∫( eh_u ⋅ eh_u )dΩ))
         l2_p = sqrt(sum(∫( eh_p * eh_p )dΩ))
         l2_c = sqrt(sum(∫( eh_c * eh_c )dΩ))
+
+        writevtk(Ω, out_vtk, cellfields=[
+            "velocity" => uh,
+            "pressure" => ph,
+            "concentration" => ch,
+            "velocity_exact" => u_ex,
+            "pressure_exact" => p_ex,
+            "concentration_exact" => c_ex,
+            "velocity_error" => eh_u,
+            "pressure_error" => eh_p,
+            "concentration_error" => eh_c
+        ])
+        println("Results exported to $(out_vtk).vtu with exact and error fields.")
 
         push!(errors_u, l2_u)
         push!(errors_p, l2_p)

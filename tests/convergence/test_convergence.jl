@@ -1,6 +1,9 @@
 using JSON
 using Gridap
 using LinearAlgebra
+using GridapDistributed
+using PartitionedArrays
+import MPI
 
 include("../../src/run_simulation.jl")
 
@@ -16,7 +19,19 @@ function recursive_merge(x::Dict, y::Dict)
     return z
 end
 
-function run_convergence()
+function my_i_am_main(parts)
+    return parts === nothing ? true : i_am_main(parts)
+end
+
+function my_barrier(parts)
+    if parts !== nothing
+        MPI.Barrier(MPI.COMM_WORLD)
+    end
+end
+
+function run_convergence(distribute, np)
+    parts = np == 1 ? nothing : distribute(LinearIndices((np,)))
+    
     base_config = JSON.parsefile("../../data/case_options.json")
     test_config = JSON.parsefile("data/test_options.json")
     config = recursive_merge(base_config, test_config)
@@ -24,22 +39,35 @@ function run_convergence()
     h_vals = config["test_options"]["mesh_sizes"]
     h_ref = config["test_options"]["reference_mesh"]
 
-    mkpath("results")
-    mkpath("meshes")
+    # Safely create folders 
+    if my_i_am_main(parts)
+        mkpath("results")
+        mkpath("meshes")
+        println("Generating Reference Mesh (h_ref = $h_ref)")
+    end
+    my_barrier(parts)
 
-    println("Generating Reference Mesh (h_ref = $h_ref)")
     config["geometry"]["mesh_size"] = h_ref
     ref_msh = "meshes/tube_ref.msh"
-    generate_tube_mesh(config, ref_msh)
+    
+    if my_i_am_main(parts)
+        generate_tube_mesh(config, ref_msh)
+        prof_file = "results/profiling_summary.txt"
+        if isfile(prof_file)
+            rm(prof_file)
+        end
+    end
+    my_barrier(parts)
     
     prof_file = "results/profiling_summary.txt"
-    if isfile(prof_file)
-        rm(prof_file)
-    end
     
-    u_ref, p_ref, c_ref, Ω_ref, dΩ_ref = run_simulation(config, ref_msh; out_vtk="results/tube_ref")
-    export_timer_summary(prof_file, "Timing Summary (h_ref=$h_ref)")
-    reset_timer!()
+    # Run simulation with standard MPI topology distributions
+    u_ref, p_ref, c_ref, Ω_ref, dΩ_ref = run_simulation(config, ref_msh; out_vtk="results/tube_ref", parts=parts)
+    
+    if my_i_am_main(parts)
+        export_timer_summary(prof_file, "Timing Summary (h_ref=$h_ref)")
+        reset_timer!()
+    end
 
     # Fixed core points to avoid boundary evaluation issues
     pts = Point{3,Float64}[]
@@ -58,7 +86,9 @@ function run_convergence()
     p_ref_vals = Float64[]
     c_ref_vals = Float64[]
 
-    println("Validating Reference Point Evaluation...")
+    if my_i_am_main(parts)
+        println("Validating Reference Point Evaluation...")
+    end
     for pt in pts
         try
             push!(u_ref_vals, u_ref(pt))
@@ -68,22 +98,33 @@ function run_convergence()
         catch
         end
     end
-    println("Evaluated $(length(valid_pts)) valid points.")
+    
+    if my_i_am_main(parts)
+        println("Evaluated $(length(valid_pts)) valid points.")
+    end
 
     errors_u = Float64[]; errors_p = Float64[]; errors_c = Float64[]
 
     for h in h_vals
-        println("\n===========================================")
-        println("Solving for mesh size h = $h")
-        println("===========================================")
+        if my_i_am_main(parts)
+            println("\n===========================================")
+            println("Solving for mesh size h = $h")
+            println("===========================================")
+        end
         
         config["geometry"]["mesh_size"] = h
         msh_path = "meshes/tube_$h.msh"
-        generate_tube_mesh(config, msh_path)
+        if my_i_am_main(parts)
+            generate_tube_mesh(config, msh_path)
+        end
+        my_barrier(parts)
         
-        uh, ph, ch, Ω, dΩ = run_simulation(config, msh_path; out_vtk="results/tube_$h")
-        export_timer_summary(prof_file, "Timing Summary (h=$h)")
-        reset_timer!()
+        uh, ph, ch, Ω, dΩ = run_simulation(config, msh_path; out_vtk="results/tube_$h", parts=parts)
+        
+        if my_i_am_main(parts)
+            export_timer_summary(prof_file, "Timing Summary (h=$h)")
+            reset_timer!()
+        end
         
         e_u_sum = 0.0; e_p_sum = 0.0; e_c_sum = 0.0
         v_count = 0
@@ -107,13 +148,20 @@ function run_convergence()
         e_c = sqrt(e_c_sum / v_count)
         
         push!(errors_u, e_u); push!(errors_p, e_p); push!(errors_c, e_c)
-        println("=> h = $h | Errs: U=$e_u, P=$e_p, C=$e_c (over $v_count pts)")
+        if my_i_am_main(parts)
+            println("=> h = $h | Errs: U=$e_u, P=$e_p, C=$e_c (over $v_count pts)")
+        end
     end
 
-    open("results/convergence_data.json", "w") do f
-        JSON.print(f, Dict("h_vals"=>h_vals, "errors_u"=>errors_u, "errors_p"=>errors_p, "errors_c"=>errors_c), 4)
+    if i_am_main(parts)
+        open("results/convergence_data.json", "w") do f
+            JSON.print(f, Dict("h_vals"=>h_vals, "errors_u"=>errors_u, "errors_p"=>errors_p, "errors_c"=>errors_c), 4)
+        end
+        println("Convergence discrete L2 data saved.")
     end
-    println("Convergence discrete L2 data saved.")
 end
 
-run_convergence()
+with_mpi() do distribute
+    np = MPI.Comm_size(MPI.COMM_WORLD)
+    run_convergence(distribute, np)
+end

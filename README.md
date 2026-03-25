@@ -9,11 +9,11 @@ The Boussinesq approximation models buoyancy-driven flows where density differen
 
 ## Code Architecture & Algorithms (Current State)
 The finite element engine utilizes robust, modern algorithms to handle extreme 3D mathematical constraints structurally:
-- **Finite Elements Formulation:** Taylor-Hood elements (`Q2/Q1`) for Velocity/Pressure strictly satisfy the Ladyzhenskaya-Babuška-Brezzi (inf-sup) condition. Concentration uses `Q2` elements natively.
+- **Finite Elements Formulation:** Uses equal-order `P1/P1` elements for Velocity/Pressure and `P2` for Concentration. The saddle-point system is stabilized using a Variational Multiscale (VMS) Algebraic Subgrid Scale (ASGS) formulation that provides stable equal-order bounds.
 - **Augmented Lagrangian Stabilization:** A continuous mathematically precise penalty `+ α (∇⋅u)(∇⋅v)` (`α = 1e3`) is injected directly into the Navier-Stokes mass matrix. This suppresses the $0.0$ diagonal structures inherent to the pressure field, strictly enforcing global incompressibility natively inside the Galerkin framework.
 - **Pressure Nullspace & Mean-Zero Pinning:** In incompressible Stokes mechanics with pure Dirichlet boundaries, pressure holds an arbitrary constant nullspace $C$. To recover the mathematically optimal $O(h^2)$ L2 spatial convergence natively in MMS configurations, the solver injects a targeted artificial compressibility penalty ($\epsilon_{\text{phys}} = 10^{-7}$) explicitly onto the Left-Hand Side of the weak formulation. This acts as a structural anchor seamlessly pinning the pressure average to exactly zero without polluting divergence bounds.
 - **SUPG Stabilization:** Streamline-Upwind/Petrov-Galerkin (SUPG) prevents spurious node-to-node oscillations at high Péclet/Reynolds configurations.
-- **Non-Linear Iterators**: Convective limits are resolved via a **Staggered (Picard) Block formulation** (`src/nonlinear_iterators/solve_picard.jl`). Instead of monolithic evaluation, it cleanly decouples the saddle-point matrices incrementally.
+- **Non-Linear Iterators**: Convective limits are resolved via a **Staggered (Picard) Block formulation** (`src/nonlinear_iterators/solve_picard.jl`) or a **Staggered Newton architecture** (`src/nonlinear_iterators/solve_staggered_newton.jl`) paired with a robust **Damped Newton-Raphson Solver** (`src/nonlinear_iterators/damped_newton.jl`). This cleanly decouples the saddle-point matrices incrementally.
 
 ### GridapSolvers Block Preconditioning & PETSc
 Because direct iterations mathematically diverge on fine 3D cylindrical limits, the project wraps the physics locally over `GridapSolvers.jl` using explicit **Block Triangular Preconditioners**:
